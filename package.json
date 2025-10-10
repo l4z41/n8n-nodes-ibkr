@@ -1,7 +1,7 @@
 {
-  "name": "n8n-nodes-ibkr",
-  "version": "0.1.4",
-  "description": "N8N node for Interactive Brokers TWS API integration",
+  "name": "@l4z41/n8n-nodes-ibkr",
+  "version": "0.2.0",
+  "description": "N8N node for Interactive Brokers TWS API integration with real-time triggers",
   "keywords": [
     "n8n-community-node-package",
     "ibkr",
@@ -10,22 +10,21 @@
     "tws"
   ],
   "license": "MIT",
-  "homepage": "",
+  "homepage": "https://github.com/l4z41/n8n-nodes-ibkr#readme",
   "author": {
-    "name": "l4z41",
-    "email": ""
+    "name": "l4z41"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/l4z41/n8n-nodes-ibkr.git"
+    "url": "git+https://github.com/l4z41/n8n-nodes-ibkr.git"
   },
   "main": "index.js",
   "scripts": {
     "build": "tsc && gulp build:icons",
     "dev": "tsc --watch",
     "format": "prettier nodes credentials --write",
-    "lint": "eslint nodes credentials package.json",
-    "lintfix": "eslint nodes credentials package.json --fix",
+    "lint": "eslint \"nodes/**/*.ts\" \"credentials/**/*.ts\" package.json",
+    "lintfix": "eslint \"nodes/**/*.ts\" \"credentials/**/*.ts\" package.json --fix",
     "prepublishOnly": "npm run build && npm run lint"
   },
   "files": [
@@ -55,5 +54,8 @@
   },
   "overrides": {
     "form-data": "^4.0.4"
+  },
+  "bugs": {
+    "url": "https://github.com/l4z41/n8n-nodes-ibkr/issues"
   }
 }
