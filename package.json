@@ -12,12 +12,12 @@
   "license": "MIT",
   "homepage": "",
   "author": {
-    "name": "",
+    "name": "l4z41",
     "email": ""
   },
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/l4z41/n8n-nodes-ibkr.git"
   },
   "main": "index.js",
   "scripts": {
