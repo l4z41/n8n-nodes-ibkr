@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.2.0] - 2025-10-10
+
+### Added
+- **NEW: Interactive Brokers Trigger Node** 🎉
+  - Automatically trigger workflows on real-time market data updates from Interactive Brokers
+  - Configurable trigger modes:
+    - **All Updates**: Trigger on every market data tick
+    - **Price Change**: Trigger only when last price changes
+    - **Bid/Ask Update**: Trigger on bid or ask price updates
+  - **Throttling**: Configurable update interval (default: 10 seconds) to prevent excessive workflow executions
+  - **Minimum Price Change**: Set minimum percentage change required for price-based triggers
+  - **Real-time Streaming**: Maintains persistent connection to TWS/Gateway for continuous data flow
+  - Provides complete market data: bid, ask, last, volume, OHLC, sizes, and timestamps
+  - Supports stocks, options, futures, and forex
+  - Automatic reconnection handling and proper cleanup on workflow deactivation
+
+### Changed
+- Updated README with comprehensive trigger node documentation
+- Added trigger usage examples and best practices
+- Added use cases section for automated trading, monitoring, and data collection
+- Updated package description to mention real-time triggers
+
+### Security
+- **Fixed all security vulnerabilities** (13 → 0 vulnerabilities)
+- Updated gulp from v4.0.2 to v5.0.1 (fixes braces vulnerability)
+- Updated n8n-workflow from v1.0.0 to v1.112.0
+- Added override for form-data to v4.0.4 (fixes critical GHSA-fjxv-7rqg-78g4)
+
+### Fixed
+- Fixed ESLint configuration to properly lint TypeScript files
+- Fixed package.json author field format for n8n community package requirements
+
 ## [0.1.4] - 2025-10-07
 
 ### Fixed
