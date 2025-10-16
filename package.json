@@ -1,6 +1,6 @@
 {
   "name": "@l4z41/n8n-nodes-ibkr",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "N8N node for Interactive Brokers TWS API integration with real-time triggers",
   "keywords": [
     "n8n-community-node-package",

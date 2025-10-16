@@ -6,7 +6,7 @@ import {
 	NodeOperationError,
 } from 'n8n-workflow';
 
-import { IBApiNext, Contract, SecType, ConnectionState } from '@stoqey/ib';
+import { IBApiNext, Contract, SecType, ConnectionState, WhatToShow, EventName } from '@stoqey/ib';
 
 export class InteractiveBrokersTrigger implements INodeType {
 	description: INodeTypeDescription = {
@@ -29,6 +29,25 @@ export class InteractiveBrokersTrigger implements INodeType {
 			},
 		],
 		properties: [
+			{
+				displayName: 'Data Mode',
+				name: 'dataMode',
+				type: 'options',
+				options: [
+					{
+						name: 'Ticks (Real-Time Quotes)',
+						value: 'ticks',
+						description: 'Stream tick-by-tick market data updates',
+					},
+					{
+						name: '5-Second Bars (OHLCV)',
+						value: 'bars',
+						description: 'Receive complete OHLC bars every 5 seconds',
+					},
+				],
+				default: 'ticks',
+				description: 'Choose between tick-by-tick data or 5-second OHLC bars',
+			},
 			{
 				displayName: 'Symbol',
 				name: 'symbol',
@@ -81,6 +100,11 @@ export class InteractiveBrokersTrigger implements INodeType {
 				displayName: 'Trigger On',
 				name: 'triggerOn',
 				type: 'options',
+				displayOptions: {
+					show: {
+						dataMode: ['ticks'],
+					},
+				},
 				options: [
 					{
 						name: 'All Updates',
@@ -108,6 +132,7 @@ export class InteractiveBrokersTrigger implements INodeType {
 				default: 0,
 				displayOptions: {
 					show: {
+						dataMode: ['ticks'],
 						triggerOn: ['priceChange'],
 					},
 				},
@@ -118,6 +143,11 @@ export class InteractiveBrokersTrigger implements INodeType {
 				name: 'updateInterval',
 				type: 'number',
 				default: 10,
+				displayOptions: {
+					show: {
+						dataMode: ['ticks'],
+					},
+				},
 				description: 'Minimum time in seconds between workflow triggers (throttling)',
 				hint: 'Prevents too many executions from rapid market updates',
 			},
@@ -126,6 +156,11 @@ export class InteractiveBrokersTrigger implements INodeType {
 				name: 'snapshot',
 				type: 'boolean',
 				default: false,
+				displayOptions: {
+					show: {
+						dataMode: ['ticks'],
+					},
+				},
 				description: 'Whether to request a snapshot instead of streaming data',
 			},
 			{
@@ -133,7 +168,58 @@ export class InteractiveBrokersTrigger implements INodeType {
 				name: 'regulatorySnapshot',
 				type: 'boolean',
 				default: false,
+				displayOptions: {
+					show: {
+						dataMode: ['ticks'],
+					},
+				},
 				description: 'Whether to include regulatory snapshot data',
+			},
+			{
+				displayName: 'What to Show',
+				name: 'whatToShow',
+				type: 'options',
+				displayOptions: {
+					show: {
+						dataMode: ['bars'],
+					},
+				},
+				options: [
+					{
+						name: 'Trades',
+						value: 'TRADES',
+						description: 'Show trade data (default)',
+					},
+					{
+						name: 'Midpoint',
+						value: 'MIDPOINT',
+						description: 'Show midpoint between bid and ask',
+					},
+					{
+						name: 'Bid',
+						value: 'BID',
+						description: 'Show bid prices',
+					},
+					{
+						name: 'Ask',
+						value: 'ASK',
+						description: 'Show ask prices',
+					},
+				],
+				default: 'TRADES',
+				description: 'Type of data to show in bars',
+			},
+			{
+				displayName: 'Use Regular Trading Hours',
+				name: 'useRTH',
+				type: 'boolean',
+				default: true,
+				displayOptions: {
+					show: {
+						dataMode: ['bars'],
+					},
+				},
+				description: 'Whether to use only regular trading hours (true) or all hours (false)',
 			},
 		],
 	};
@@ -144,15 +230,22 @@ export class InteractiveBrokersTrigger implements INodeType {
 		const port = credentials.port as number;
 		const clientId = credentials.clientId as number;
 
+		const dataMode = this.getNodeParameter('dataMode', 'ticks') as string;
 		const symbol = this.getNodeParameter('symbol') as string;
 		const secType = this.getNodeParameter('secType', 'STK') as string;
 		const exchange = this.getNodeParameter('exchange', 'SMART') as string;
 		const currency = this.getNodeParameter('currency', 'USD') as string;
+
+		// Ticks mode parameters
 		const triggerOn = this.getNodeParameter('triggerOn', 'all') as string;
 		const minPriceChange = this.getNodeParameter('minPriceChange', 0) as number;
 		const updateInterval = this.getNodeParameter('updateInterval', 10) as number;
 		const snapshot = this.getNodeParameter('snapshot', false) as boolean;
 		const regulatorySnapshot = this.getNodeParameter('regulatorySnapshot', false) as boolean;
+
+		// Bars mode parameters
+		const whatToShow = this.getNodeParameter('whatToShow', 'TRADES') as string;
+		const useRTH = this.getNodeParameter('useRTH', true) as boolean;
 
 		// Create IBKR client with auto-reconnect enabled
 		const ib = new IBApiNext({
@@ -165,8 +258,10 @@ export class InteractiveBrokersTrigger implements INodeType {
 		let subscription: any = null;
 		let connectionStateSubscription: any = null;
 		let emitInterval: NodeJS.Timeout | null = null;
+		let realTimeBarsReqId: number | null = null;
 		let lastPrice: number | null = null;
 		let latestTickerData: any = null;
+		let updateCount = 0;
 
 		const contract: Contract = {
 			symbol,
@@ -175,186 +270,313 @@ export class InteractiveBrokersTrigger implements INodeType {
 			currency,
 		};
 
-		// Map tick type IDs to readable field names
-		const tickTypeMap: { [key: number]: string } = {
-			1: 'bid',
-			2: 'ask',
-			4: 'last',
-			6: 'high',
-			7: 'low',
-			9: 'close',
-			14: 'open',
-			0: 'bidSize',
-			3: 'askSize',
-			5: 'lastSize',
-			8: 'volume',
-			45: 'lastTimestamp',
-		};
+		if (dataMode === 'bars') {
+			// Real-Time Bars Mode (5-second OHLC bars)
+			try {
+				// Monitor connection state changes
+				connectionStateSubscription = ib.connectionState.subscribe((state: ConnectionState) => {
+					switch (state) {
+						case ConnectionState.Connected:
+							this.logger.info(`Connected to IBKR at ${host}:${port}, requesting 5-second bars for ${symbol}`);
 
-		// Function to subscribe to market data
-		const subscribeToMarketData = () => {
-			// Clean up existing subscription if any
-			if (subscription) {
-				try {
-					subscription.unsubscribe();
-				} catch (err) {
-					// Ignore unsubscribe errors
-				}
-				subscription = null;
-			}
+							// Subscribe to real-time bars using the underlying API
+							realTimeBarsReqId = (ib as any).api.getNextReqId?.() || Math.floor(Math.random() * 10000);
 
-			// Subscribe to market data - this will continuously stream data
-			// IBApiNext will handle reconnection automatically and maintain the subscription
-			subscription = ib.getMarketData(contract, '', snapshot, regulatorySnapshot)
-				.subscribe({
-					next: (update: any) => {
-						try {
-							// Extract ticker data from IB API tick types
-							const tickerData: any = {
-								symbol,
-								currency,
-								timestamp: new Date().toISOString(),
-							};
+							// Set up the realtimeBar event listener
+							(ib as any).api.on(EventName.realtimeBar, (
+								reqId: number,
+								date: number,
+								open: number,
+								high: number,
+								low: number,
+								close: number,
+								volume: number,
+								WAP: number,
+								count: number
+							) => {
+								if (reqId === realTimeBarsReqId) {
+									const barData = {
+										symbol,
+										currency,
+										timestamp: new Date(date * 1000).toISOString(),
+										date: date,
+										open,
+										high,
+										low,
+										close,
+										volume,
+										wap: WAP,
+										count,
+										barType: 'realtime-5sec',
+									};
 
-							let hasUpdate = false;
-							let hasPriceUpdate = false;
-							let hasBidAskUpdate = false;
+									// Emit bar data immediately (every 5 seconds)
+									this.emit([this.helpers.returnJsonArray(barData)]);
 
-							if (update?.all && update.all instanceof Map && update.all.size > 0) {
-								for (const [tickTypeId, tickData] of update.all.entries()) {
-									const fieldName = tickTypeMap[tickTypeId as number];
-									if (fieldName && tickData && typeof tickData === 'object' && 'value' in tickData) {
-										// Only store if value is valid (not -1 which means no data)
-										if (tickData.value !== -1 && tickData.value !== undefined) {
-											tickerData[fieldName] = tickData.value;
-											hasUpdate = true;
-
-											// Track price updates
-											if (fieldName === 'last' || fieldName === 'bid' || fieldName === 'ask') {
-												if (fieldName === 'last') {
-													hasPriceUpdate = true;
-												}
-												if (fieldName === 'bid' || fieldName === 'ask') {
-													hasBidAskUpdate = true;
-												}
-											}
-
-											// Store timestamp if available
-											if (tickData.ingressTm) {
-												tickerData[`${fieldName}Time`] = tickData.ingressTm;
-											}
-										}
-									}
+									this.logger.info(`Bar received: O=${open} H=${high} L=${low} C=${close} V=${volume}`);
 								}
-							}
+							});
 
-							// Apply trigger filters
-							let shouldTrigger = false;
-
-							if (triggerOn === 'all') {
-								shouldTrigger = hasUpdate;
-							} else if (triggerOn === 'priceChange') {
-								if (hasPriceUpdate && tickerData.last !== undefined) {
-									if (lastPrice === null) {
-										// First price update
-										shouldTrigger = true;
-										lastPrice = tickerData.last;
-									} else {
-										// Check if price change exceeds minimum threshold
-										const priceChange = Math.abs((tickerData.last - lastPrice) / lastPrice * 100);
-										if (priceChange >= minPriceChange) {
-											shouldTrigger = true;
-											tickerData.priceChange = priceChange;
-											tickerData.previousPrice = lastPrice;
-											lastPrice = tickerData.last;
-										}
-									}
-								}
-							} else if (triggerOn === 'bidAsk') {
-								shouldTrigger = hasBidAskUpdate;
-							}
-
-							// Store latest data if it meets trigger criteria
-							// The interval timer will emit this periodically
-							if (shouldTrigger) {
-								latestTickerData = tickerData;
-							}
-						} catch (error: any) {
-							this.logger.error(`Error processing market data: ${error.message}`);
-						}
-					},
-					error: (err: any) => {
-						this.logger.error(`Market data subscription error: ${err.message}`);
-						// Note: IBApiNext will automatically handle reconnection
-						// The subscription will resume once connection is re-established
-					},
-					complete: () => {
-						this.logger.info('Market data subscription completed');
-					},
-				});
-		};
-
-		try {
-			// Monitor connection state changes
-			connectionStateSubscription = ib.connectionState.subscribe((state: ConnectionState) => {
-				switch (state) {
-					case ConnectionState.Connected:
-						this.logger.info(`Connected to IBKR at ${host}:${port}, monitoring ${symbol}`);
-						// Subscribe to market data when connected
-						subscribeToMarketData();
-						break;
-					case ConnectionState.Disconnected:
-						this.logger.warn('IBKR connection lost. Auto-reconnect will attempt to restore connection...');
-						break;
-					case ConnectionState.Connecting:
-						this.logger.info('Connecting to IBKR...');
-						break;
-				}
-			});
-
-			// Connect to TWS/Gateway
-			ib.connect(clientId);
-
-			// Wait for initial connection to be established
-			await new Promise((resolve, reject) => {
-				const timeout = setTimeout(() => {
-					reject(new Error('Connection timeout after 10 seconds'));
-				}, 10000);
-
-				const stateSub = ib.connectionState.subscribe((state: ConnectionState) => {
-					if (state === ConnectionState.Connected) {
-						clearTimeout(timeout);
-						stateSub.unsubscribe();
-						resolve(undefined);
+							// Request real-time bars (5 seconds, using whatToShow parameter)
+							(ib as any).api.reqRealTimeBars(
+								realTimeBarsReqId,
+								contract,
+								5, // bar size in seconds (must be 5)
+								whatToShow as WhatToShow,
+								useRTH,
+								[] // options
+							);
+							break;
+						case ConnectionState.Disconnected:
+							this.logger.warn('IBKR connection lost. Auto-reconnect will attempt to restore connection...');
+							break;
+						case ConnectionState.Connecting:
+							this.logger.info('Connecting to IBKR...');
+							break;
 					}
 				});
-			});
 
-			// Set up interval timer to emit data every X seconds
-			emitInterval = setInterval(() => {
-				if (latestTickerData) {
-					this.emit([this.helpers.returnJsonArray(latestTickerData)]);
-					latestTickerData = null; // Clear after emitting
+				// Connect to TWS/Gateway
+				ib.connect(clientId);
+
+				// Wait for initial connection to be established
+				await new Promise((resolve, reject) => {
+					const timeout = setTimeout(() => {
+						reject(new Error('Connection timeout after 10 seconds'));
+					}, 10000);
+
+					const stateSub = ib.connectionState.subscribe((state: ConnectionState) => {
+						if (state === ConnectionState.Connected) {
+							clearTimeout(timeout);
+							stateSub.unsubscribe();
+							resolve(undefined);
+						}
+					});
+				});
+
+			} catch (error: any) {
+				// Clean up on initial connection failure
+				if (connectionStateSubscription) {
+					connectionStateSubscription.unsubscribe();
 				}
-			}, updateInterval * 1000);
+				if (realTimeBarsReqId !== null) {
+					try {
+						(ib as any).api.cancelRealTimeBars?.(realTimeBarsReqId);
+					} catch (err) {
+						// Ignore cancel errors
+					}
+				}
+				ib.disconnect();
 
-		} catch (error: any) {
-			// Clean up on initial connection failure
-			if (emitInterval) {
-				clearInterval(emitInterval);
+				throw new NodeOperationError(
+					this.getNode(),
+					`IBKR Connection Error: ${error.message}. Ensure TWS/Gateway is running on ${host}:${port} with API enabled.`
+				);
 			}
-			if (subscription) {
-				subscription.unsubscribe();
-			}
-			if (connectionStateSubscription) {
-				connectionStateSubscription.unsubscribe();
-			}
-			ib.disconnect();
 
-			throw new NodeOperationError(
-				this.getNode(),
-				`IBKR Connection Error: ${error.message}. Ensure TWS/Gateway is running on ${host}:${port} with API enabled.`
-			);
+		} else {
+			// Ticks Mode (original implementation)
+			// Map tick type IDs to readable field names
+			const tickTypeMap: { [key: number]: string } = {
+				1: 'bid',
+				2: 'ask',
+				4: 'last',
+				6: 'high',
+				7: 'low',
+				9: 'close',
+				14: 'open',
+				0: 'bidSize',
+				3: 'askSize',
+				5: 'lastSize',
+				8: 'volume',
+				45: 'lastTimestamp',
+			};
+
+			// Function to subscribe to market data
+			const subscribeToMarketData = () => {
+				// Clean up existing subscription if any
+				if (subscription) {
+					try {
+						subscription.unsubscribe();
+					} catch (err) {
+						// Ignore unsubscribe errors
+					}
+					subscription = null;
+				}
+
+				// Subscribe to market data - this will continuously stream data
+				// IBApiNext will handle reconnection automatically and maintain the subscription
+				subscription = ib.getMarketData(contract, '', snapshot, regulatorySnapshot)
+					.subscribe({
+						next: (update: any) => {
+							try {
+								updateCount++;
+
+								// Log first update to show which tick types are received
+								if (updateCount === 1 && update?.all instanceof Map) {
+									const receivedTicks = Array.from(update.all.keys());
+									this.logger.info(`Market data tick types received: ${receivedTicks.join(', ')}`);
+
+									// Log which OHLC ticks are present
+									const ohlcTickMap: { [key: number]: string } = {6: 'high', 7: 'low', 9: 'close', 14: 'open'};
+									const ohlcTicks = receivedTicks.filter(t => [6, 7, 9, 14].includes(t as number));
+									if (ohlcTicks.length > 0) {
+										this.logger.info(`OHLC tick types present: ${ohlcTicks.map(t => {
+											return `${t}(${ohlcTickMap[t as number]})`;
+										}).join(', ')}`);
+									} else {
+										this.logger.warn('No OHLC tick types (6=high, 7=low, 9=close, 14=open) received in first update');
+										this.logger.info('Note: OHLC data is event-driven and may not be sent on every tick');
+									}
+								}
+
+								// Extract ticker data from IB API tick types
+								const tickerData: any = {
+									symbol,
+									currency,
+									timestamp: new Date().toISOString(),
+								};
+
+								let hasUpdate = false;
+								let hasPriceUpdate = false;
+								let hasBidAskUpdate = false;
+
+								if (update?.all && update.all instanceof Map && update.all.size > 0) {
+									for (const [tickTypeId, tickData] of update.all.entries()) {
+										const fieldName = tickTypeMap[tickTypeId as number];
+										if (fieldName && tickData && typeof tickData === 'object' && 'value' in tickData) {
+											// Only store if value is valid (not -1 which means no data)
+											if (tickData.value !== -1 && tickData.value !== undefined) {
+												tickerData[fieldName] = tickData.value;
+												hasUpdate = true;
+
+												// Track price updates
+												if (fieldName === 'last' || fieldName === 'bid' || fieldName === 'ask') {
+													if (fieldName === 'last') {
+														hasPriceUpdate = true;
+													}
+													if (fieldName === 'bid' || fieldName === 'ask') {
+														hasBidAskUpdate = true;
+													}
+												}
+
+												// Store timestamp if available
+												if (tickData.ingressTm) {
+													tickerData[`${fieldName}Time`] = tickData.ingressTm;
+												}
+											}
+										}
+									}
+								}
+
+								// Apply trigger filters
+								let shouldTrigger = false;
+
+								if (triggerOn === 'all') {
+									shouldTrigger = hasUpdate;
+								} else if (triggerOn === 'priceChange') {
+									if (hasPriceUpdate && tickerData.last !== undefined) {
+										if (lastPrice === null) {
+											// First price update
+											shouldTrigger = true;
+											lastPrice = tickerData.last;
+										} else {
+											// Check if price change exceeds minimum threshold
+											const priceChange = Math.abs((tickerData.last - lastPrice) / lastPrice * 100);
+											if (priceChange >= minPriceChange) {
+												shouldTrigger = true;
+												tickerData.priceChange = priceChange;
+												tickerData.previousPrice = lastPrice;
+												lastPrice = tickerData.last;
+											}
+										}
+									}
+								} else if (triggerOn === 'bidAsk') {
+									shouldTrigger = hasBidAskUpdate;
+								}
+
+								// Store latest data if it meets trigger criteria
+								// The interval timer will emit this periodically
+								if (shouldTrigger) {
+									latestTickerData = tickerData;
+								}
+							} catch (error: any) {
+								this.logger.error(`Error processing market data: ${error.message}`);
+							}
+						},
+						error: (err: any) => {
+							this.logger.error(`Market data subscription error: ${err.message}`);
+							// Note: IBApiNext will automatically handle reconnection
+							// The subscription will resume once connection is re-established
+						},
+						complete: () => {
+							this.logger.info('Market data subscription completed');
+						},
+					});
+			};
+
+			try {
+				// Monitor connection state changes
+				connectionStateSubscription = ib.connectionState.subscribe((state: ConnectionState) => {
+					switch (state) {
+						case ConnectionState.Connected:
+							this.logger.info(`Connected to IBKR at ${host}:${port}, monitoring ${symbol}`);
+							// Subscribe to market data when connected
+							subscribeToMarketData();
+							break;
+						case ConnectionState.Disconnected:
+							this.logger.warn('IBKR connection lost. Auto-reconnect will attempt to restore connection...');
+							break;
+						case ConnectionState.Connecting:
+							this.logger.info('Connecting to IBKR...');
+							break;
+					}
+				});
+
+				// Connect to TWS/Gateway
+				ib.connect(clientId);
+
+				// Wait for initial connection to be established
+				await new Promise((resolve, reject) => {
+					const timeout = setTimeout(() => {
+						reject(new Error('Connection timeout after 10 seconds'));
+					}, 10000);
+
+					const stateSub = ib.connectionState.subscribe((state: ConnectionState) => {
+						if (state === ConnectionState.Connected) {
+							clearTimeout(timeout);
+							stateSub.unsubscribe();
+							resolve(undefined);
+						}
+					});
+				});
+
+				// Set up interval timer to emit data every X seconds
+				emitInterval = setInterval(() => {
+					if (latestTickerData) {
+						this.emit([this.helpers.returnJsonArray(latestTickerData)]);
+						latestTickerData = null; // Clear after emitting
+					}
+				}, updateInterval * 1000);
+
+			} catch (error: any) {
+				// Clean up on initial connection failure
+				if (emitInterval) {
+					clearInterval(emitInterval);
+				}
+				if (subscription) {
+					subscription.unsubscribe();
+				}
+				if (connectionStateSubscription) {
+					connectionStateSubscription.unsubscribe();
+				}
+				ib.disconnect();
+
+				throw new NodeOperationError(
+					this.getNode(),
+					`IBKR Connection Error: ${error.message}. Ensure TWS/Gateway is running on ${host}:${port} with API enabled.`
+				);
+			}
 		}
 
 		// Close function to clean up when trigger is deactivated
@@ -377,7 +599,7 @@ export class InteractiveBrokersTrigger implements INodeType {
 				connectionStateSubscription = null;
 			}
 
-			// Unsubscribe from market data
+			// Unsubscribe from market data (ticks mode)
 			if (subscription) {
 				try {
 					subscription.unsubscribe();
@@ -385,6 +607,16 @@ export class InteractiveBrokersTrigger implements INodeType {
 					// Ignore unsubscribe errors
 				}
 				subscription = null;
+			}
+
+			// Cancel real-time bars (bars mode)
+			if (realTimeBarsReqId !== null) {
+				try {
+					(ib as any).api.cancelRealTimeBars?.(realTimeBarsReqId);
+				} catch (err) {
+					// Ignore cancel errors
+				}
+				realTimeBarsReqId = null;
 			}
 
 			// Disconnect from IBKR

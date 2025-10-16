@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.2] - 2025-10-16
+
+### Added
+- **NEW: Real-Time Bars Support** 📊
+  - Added support for IBKR's `reqRealTimeBars` API to get 5-second OHLC candles
+  - New "Data Mode" option in trigger node: "Ticks" (default) or "5-Second Bars"
+  - 5-Second Bars mode provides complete OHLC+V data every 5 seconds
+  - Ideal for users who need regular candle data instead of tick-by-tick streams
+  - Automatically handles reconnection for bar subscriptions
+  - Includes bar timestamp, open, high, low, close, volume, WAP, and trade count
+
+### Documentation
+- Updated README with Real-Time Bars usage and limitations
+- Added comparison between Ticks mode and 5-Second Bars mode
+- Documented IBKR API limitations for real-time bars (30 second pacing rule)
+
 ## [0.2.1] - 2025-10-16
 
 ### Fixed

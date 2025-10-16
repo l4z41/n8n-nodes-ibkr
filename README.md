@@ -97,10 +97,16 @@ The trigger node automatically executes your workflow when new market data arriv
 
 #### Configuration Options
 
+**Common Settings:**
+- **Data Mode**: Choose between "Ticks" or "5-Second Bars"
+  - **Ticks (Real-Time Quotes)**: Stream tick-by-tick market data updates (default)
+  - **5-Second Bars (OHLCV)**: Receive complete OHLC candles every 5 seconds
 - **Symbol**: Stock symbol to monitor (e.g., AAPL, TSLA)
 - **Security Type**: Stock, Option, Future, or Forex
 - **Exchange**: Exchange to use (default: SMART)
 - **Currency**: Contract currency (default: USD)
+
+**Ticks Mode Options:**
 - **Trigger On**:
   - **All Updates**: Trigger on every market data update
   - **Price Change**: Trigger only when last price changes
@@ -110,15 +116,74 @@ The trigger node automatically executes your workflow when new market data arriv
 - **Snapshot Mode**: Request a snapshot instead of streaming data
 - **Include Regulatory Snapshot**: Include regulatory snapshot data
 
+**5-Second Bars Mode Options:**
+- **What to Show**: Type of data (Trades, Midpoint, Bid, Ask)
+- **Use Regular Trading Hours**: Include only RTH data or all hours
+
 #### Data Provided
 
 Each trigger event includes:
 - Symbol and currency
 - Current prices (bid, ask, last)
 - Volume and sizes (bidSize, askSize, lastSize)
-- OHLC data (open, high, low, close)
+- OHLC data (open, high, low, close) - **See limitations below**
 - Timestamps for updates
 - Previous price and change % (for price change mode)
+
+#### Understanding OHLC Data in Real-Time Streams
+
+**Important**: OHLC (Open, High, Low, Close) data behaves differently in real-time market data streams compared to historical data:
+
+- **Open (tick 14)**: Only sent once at market open for the current session
+- **High (tick 6)**: Only updated when a new intraday high is reached
+- **Low (tick 7)**: Only updated when a new intraday low is reached
+- **Close (tick 9)**: Previous day's closing price (sent once at session start)
+- **Volume (tick 8)**: Cumulative volume for the current trading day
+
+These are **event-driven updates**, not continuously streaming values. This means:
+
+✅ **You WILL receive**:
+- Bid, ask, and last prices on every tick
+- Volume updates throughout the day
+- Close price (previous day) at the start of session
+- High/low prices when new intraday extremes are reached
+- Open price at the start of the trading session
+
+❌ **You WILL NOT always receive**:
+- Open, high, and low on every single market data update
+- Complete OHLC bars at regular intervals (like 5-second or 1-minute candles)
+
+**For building OHLC candles**: If you need regular OHLC bars:
+1. **Use 5-Second Bars Mode** - Select "5-Second Bars (OHLCV)" in Data Mode to receive complete OHLC candles every 5 seconds
+2. Build your own candles from the tick-by-tick data using the `last` price and timestamps
+3. Use historical data APIs with appropriate bar sizes
+
+#### 5-Second Bars Mode
+
+**NEW in v0.2.2**: The trigger node now supports IBKR's Real-Time Bars API, providing complete OHLC candles every 5 seconds.
+
+**Benefits:**
+- ✅ Complete OHLC data (Open, High, Low, Close, Volume)
+- ✅ Guaranteed 5-second intervals (not event-driven)
+- ✅ Includes WAP (Weighted Average Price) and trade count
+- ✅ Perfect for building real-time candle charts
+- ✅ Automatic reconnection support
+
+**Data Provided in Bars Mode:**
+Each 5-second bar includes:
+- `symbol`, `currency`: Contract identification
+- `timestamp`, `date`: Bar timestamp
+- `open`, `high`, `low`, `close`: OHLC prices
+- `volume`: Trading volume for the 5-second period
+- `wap`: Weighted Average Price
+- `count`: Number of trades in the period
+- `barType`: Always "realtime-5sec"
+
+**Important Limitations:**
+- Bar size is **fixed at 5 seconds** (IBKR API limitation)
+- Subject to IBKR's pacing rules (max 60 new bar requests per 10 minutes)
+- Only one active real-time bars subscription per contract per client ID
+- Requires live market data subscriptions for the instrument
 
 ### Example Workflows
 
