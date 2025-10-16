@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.1] - 2025-10-16
+
+### Fixed
+- **CRITICAL FIX: Trigger Node Auto-Reconnection** 🔧
+  - Fixed connection loss issue when IBKR Gateway performs 24-hour forced restart
+  - Trigger node now automatically reconnects without manual intervention
+  - Implemented connection state monitoring to detect disconnections
+  - Added automatic resubscription to market data after reconnection
+  - Enabled built-in IBApiNext auto-reconnect (5 second interval)
+  - Added connection watchdog (10 second timeout) to detect dead connections
+  - Workflows now resume operation automatically after gateway restarts
+  - **No longer requires disabling/enabling workflow to restore connection**
+
 ## [0.2.0] - 2025-10-10
 
 ### Added

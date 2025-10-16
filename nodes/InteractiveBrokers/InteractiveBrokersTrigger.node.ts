@@ -6,7 +6,7 @@ import {
 	NodeOperationError,
 } from 'n8n-workflow';
 
-import { IBApiNext, Contract, SecType } from '@stoqey/ib';
+import { IBApiNext, Contract, SecType, ConnectionState } from '@stoqey/ib';
 
 export class InteractiveBrokersTrigger implements INodeType {
 	description: INodeTypeDescription = {
@@ -154,15 +154,17 @@ export class InteractiveBrokersTrigger implements INodeType {
 		const snapshot = this.getNodeParameter('snapshot', false) as boolean;
 		const regulatorySnapshot = this.getNodeParameter('regulatorySnapshot', false) as boolean;
 
-		// Create IBKR client
+		// Create IBKR client with auto-reconnect enabled
 		const ib = new IBApiNext({
 			host,
 			port,
+			reconnectInterval: 5000, // Reconnect after 5 seconds
+			connectionWatchdogInterval: 10, // 10 second watchdog to detect dead connections
 		});
 
 		let subscription: any = null;
+		let connectionStateSubscription: any = null;
 		let emitInterval: NodeJS.Timeout | null = null;
-		let isConnected = false;
 		let lastPrice: number | null = null;
 		let latestTickerData: any = null;
 
@@ -189,25 +191,20 @@ export class InteractiveBrokersTrigger implements INodeType {
 			45: 'lastTimestamp',
 		};
 
-		try {
-			// Connect to TWS/Gateway
-			await ib.connect(clientId);
-			isConnected = true;
-
-			// Wait for connection to be fully established
-			await new Promise((resolve) => setTimeout(resolve, 2000));
-
-			this.logger.info(`Connected to IBKR at ${host}:${port}, monitoring ${symbol}`);
-
-			// Set up interval timer to emit data every X seconds
-			emitInterval = setInterval(() => {
-				if (latestTickerData) {
-					this.emit([this.helpers.returnJsonArray(latestTickerData)]);
-					latestTickerData = null; // Clear after emitting
+		// Function to subscribe to market data
+		const subscribeToMarketData = () => {
+			// Clean up existing subscription if any
+			if (subscription) {
+				try {
+					subscription.unsubscribe();
+				} catch (err) {
+					// Ignore unsubscribe errors
 				}
-			}, updateInterval * 1000);
+				subscription = null;
+			}
 
 			// Subscribe to market data - this will continuously stream data
+			// IBApiNext will handle reconnection automatically and maintain the subscription
 			subscription = ib.getMarketData(contract, '', snapshot, regulatorySnapshot)
 				.subscribe({
 					next: (update: any) => {
@@ -288,17 +285,72 @@ export class InteractiveBrokersTrigger implements INodeType {
 					},
 					error: (err: any) => {
 						this.logger.error(`Market data subscription error: ${err.message}`);
+						// Note: IBApiNext will automatically handle reconnection
+						// The subscription will resume once connection is re-established
 					},
 					complete: () => {
 						this.logger.info('Market data subscription completed');
 					},
 				});
+		};
+
+		try {
+			// Monitor connection state changes
+			connectionStateSubscription = ib.connectionState.subscribe((state: ConnectionState) => {
+				switch (state) {
+					case ConnectionState.Connected:
+						this.logger.info(`Connected to IBKR at ${host}:${port}, monitoring ${symbol}`);
+						// Subscribe to market data when connected
+						subscribeToMarketData();
+						break;
+					case ConnectionState.Disconnected:
+						this.logger.warn('IBKR connection lost. Auto-reconnect will attempt to restore connection...');
+						break;
+					case ConnectionState.Connecting:
+						this.logger.info('Connecting to IBKR...');
+						break;
+				}
+			});
+
+			// Connect to TWS/Gateway
+			ib.connect(clientId);
+
+			// Wait for initial connection to be established
+			await new Promise((resolve, reject) => {
+				const timeout = setTimeout(() => {
+					reject(new Error('Connection timeout after 10 seconds'));
+				}, 10000);
+
+				const stateSub = ib.connectionState.subscribe((state: ConnectionState) => {
+					if (state === ConnectionState.Connected) {
+						clearTimeout(timeout);
+						stateSub.unsubscribe();
+						resolve(undefined);
+					}
+				});
+			});
+
+			// Set up interval timer to emit data every X seconds
+			emitInterval = setInterval(() => {
+				if (latestTickerData) {
+					this.emit([this.helpers.returnJsonArray(latestTickerData)]);
+					latestTickerData = null; // Clear after emitting
+				}
+			}, updateInterval * 1000);
 
 		} catch (error: any) {
-			if (isConnected) {
-				ib.disconnect();
-				isConnected = false;
+			// Clean up on initial connection failure
+			if (emitInterval) {
+				clearInterval(emitInterval);
 			}
+			if (subscription) {
+				subscription.unsubscribe();
+			}
+			if (connectionStateSubscription) {
+				connectionStateSubscription.unsubscribe();
+			}
+			ib.disconnect();
+
 			throw new NodeOperationError(
 				this.getNode(),
 				`IBKR Connection Error: ${error.message}. Ensure TWS/Gateway is running on ${host}:${port} with API enabled.`
@@ -312,16 +364,34 @@ export class InteractiveBrokersTrigger implements INodeType {
 			// Clear the emit interval timer
 			if (emitInterval) {
 				clearInterval(emitInterval);
+				emitInterval = null;
+			}
+
+			// Unsubscribe from connection state
+			if (connectionStateSubscription) {
+				try {
+					connectionStateSubscription.unsubscribe();
+				} catch (err) {
+					// Ignore unsubscribe errors
+				}
+				connectionStateSubscription = null;
 			}
 
 			// Unsubscribe from market data
 			if (subscription) {
-				subscription.unsubscribe();
+				try {
+					subscription.unsubscribe();
+				} catch (err) {
+					// Ignore unsubscribe errors
+				}
+				subscription = null;
 			}
 
 			// Disconnect from IBKR
-			if (isConnected) {
+			try {
 				ib.disconnect();
+			} catch (err) {
+				// Ignore disconnect errors
 			}
 		};
 
